@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import time
+import subprocess
 from datetime import datetime, timedelta
 
 import odoo
@@ -288,10 +289,9 @@ class MetricsCollector(models.AbstractModel):
         mem_limit_mb = int(mem_limit_bytes / (1024 * 1024))
 
         # Disk used at the Odoo data dir if it exists, otherwise root.
-        disk_path = "/var/lib/odoo" if os.path.isdir("/var/lib/odoo") else "/"
         try:
-            disk_used_mb = int(psutil.disk_usage(disk_path).used / (1024 * 1024))
-        except OSError:
+            disk_used_mb = self._du_size_mb("/")
+        except Exception:
             disk_used_mb = 0
 
         uptime_seconds = int(time.time() - proc.create_time())
@@ -332,6 +332,7 @@ class MetricsCollector(models.AbstractModel):
         or 5xx. 4xx responses are not retried — the token is bad or the
         instance was deprovisioned, both of which are not fixed by retrying.
         """
+
         config = self._get_config()
         if config is None:
             _logger.info("ikerp_metrics: not configured, skipping")
@@ -418,3 +419,11 @@ class MetricsCollector(models.AbstractModel):
         # hmac.compare_digest needs equal-length-ish inputs to be useful;
         # it short-circuits on length mismatch but doesn't leak content.
         return hmac.compare_digest(provided, expected)
+
+    def _du_size_mb(self, path="/"):
+        result = subprocess.run(
+            ["du", "-sm", "--exclude=/proc", "--exclude=/sys", "--exclude=/dev", path],
+            capture_output=True,
+            text=True
+        )
+        return int(result.stdout.split()[0])
