@@ -288,9 +288,12 @@ class MetricsCollector(models.AbstractModel):
             mem_limit_bytes = psutil.virtual_memory().total
         mem_limit_mb = int(mem_limit_bytes / (1024 * 1024))
 
-        # Disk used at the Odoo data dir if it exists, otherwise root.
+        # Disk used by this Odoo tenant: DB (pg_database_size) + filestore.
+        # Mirrors ikerp.storage so both modules report the same number.
         try:
-            disk_used_mb = self._du_size_mb("/")
+            db_bytes = self._measure_db_bytes()
+            fs_bytes = self._measure_filestore_bytes()
+            disk_used_mb = _bytes_to_mb_ceil(db_bytes + fs_bytes)
         except Exception:
             disk_used_mb = 0
 
@@ -420,10 +423,40 @@ class MetricsCollector(models.AbstractModel):
         # it short-circuits on length mismatch but doesn't leak content.
         return hmac.compare_digest(provided, expected)
 
-    def _du_size_mb(self, path="/"):
-        result = subprocess.run(
-            ["du", "-sm", "--exclude=/proc", "--exclude=/sys", "--exclude=/dev", path],
-            capture_output=True,
-            text=True
-        )
-        return int(result.stdout.split()[0])
+    def _measure_db_bytes(self):
+        self.env.cr.execute("SELECT pg_database_size(current_database())")
+        row = self.env.cr.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+    def _measure_filestore_bytes(self):
+        path = tools.config.filestore(self.env.cr.dbname)
+        if not path or not os.path.isdir(path):
+            return 0
+        try:
+            proc = subprocess.run(
+                ["du", "-sb", path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                return int(proc.stdout.split()[0])
+            _logger.warning(
+                "ikerp_metrics: du -sb %s returned %s; falling back to os.walk. stderr=%s",
+                path, proc.returncode, proc.stderr[:200],
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, OSError) as exc:
+            _logger.warning(
+                "ikerp_metrics: du failed (%s); falling back to os.walk for %s.",
+                exc, path,
+            )
+        total = 0
+        for dirpath, _dirs, files in os.walk(path):
+            for fname in files:
+                fpath = os.path.join(dirpath, fname)
+                try:
+                    total += os.path.getsize(fpath)
+                except OSError:
+                    continue
+        return total
