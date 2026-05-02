@@ -18,7 +18,7 @@ import subprocess
 from datetime import datetime, timedelta
 
 import odoo
-from odoo import api, models, release
+from odoo import api, models, release, tools
 
 _logger = logging.getLogger(__name__)
 
@@ -291,9 +291,8 @@ class MetricsCollector(models.AbstractModel):
         # Disk used by this Odoo tenant: DB (pg_database_size) + filestore.
         # Mirrors ikerp.storage so both modules report the same number.
         try:
-            db_bytes = self._measure_db_bytes()
-            fs_bytes = self._measure_filestore_bytes()
-            disk_used_mb = _bytes_to_mb_ceil(db_bytes + fs_bytes)
+            total_bytes = self._measure_db_bytes() + self._measure_filestore_bytes()
+            disk_used_mb = (total_bytes + (1 << 20) - 1) >> 20
         except Exception:
             disk_used_mb = 0
 
@@ -336,6 +335,10 @@ class MetricsCollector(models.AbstractModel):
         instance was deprovisioned, both of which are not fixed by retrying.
         """
 
+        if payload is None:
+            payload = self._collect()
+        
+        _logger.info('RESULTS: %s', payload)
         config = self._get_config()
         if config is None:
             _logger.info("ikerp_metrics: not configured, skipping")
@@ -346,8 +349,6 @@ class MetricsCollector(models.AbstractModel):
 
         url, instance_id, token = config
 
-        if payload is None:
-            payload = self._collect()
 
         headers = {
             "Authorization": "Bearer " + token,
